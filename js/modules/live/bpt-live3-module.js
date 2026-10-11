@@ -19,7 +19,6 @@
   let liveIdentityConfirmed=false;
   const LIVE_IDENTITY_SESSION_KEY="bpt_live3_identity_confirmed_session";
   const LIVE_TRUSTED_DEVICE_KEY="bpt_live3_trusted_device_v1";
-  const LIVE_TRUSTED_DEVICE_MS=30*24*60*60*1000;
 
   function identityConfirmedThisSession(){
     return liveIdentityConfirmed===true;
@@ -31,13 +30,13 @@
   }
 
   function rememberTrustedDevice(name){
-    try{localStorage.setItem(LIVE_TRUSTED_DEVICE_KEY,JSON.stringify({name,expiresAt:Date.now()+LIVE_TRUSTED_DEVICE_MS}));}catch(_e){}
+    try{localStorage.setItem(LIVE_TRUSTED_DEVICE_KEY,JSON.stringify({name}));}catch(_e){}
   }
 
   function restoreTrustedDevice(){
     try{
       const saved=JSON.parse(localStorage.getItem(LIVE_TRUSTED_DEVICE_KEY)||"null");
-      if(!saved?.name||Number(saved.expiresAt)<=Date.now()){
+      if(!saved?.name){
         localStorage.removeItem(LIVE_TRUSTED_DEVICE_KEY);
         return false;
       }
@@ -599,10 +598,49 @@
 
   function renderConnectedIdentityBadge(){
     const el=document.getElementById("bptConnectedIdentity");
-    if(!el)return;
+    const logoutBtn=document.getElementById("bptLogoutBtn");
     const name=String(liveIdentityName()||"").trim();
-    el.textContent=name?`Connecté : ${name}`:"";
-    el.title=name?`Profil connecté : ${name}`:"";
+    if(el){
+      el.textContent=name?`Connecté : ${name}`:"";
+      el.title=name?`Profil connecté : ${name}`:"";
+    }
+    if(logoutBtn)logoutBtn.hidden=!(name&&liveIdentityConfirmed);
+  }
+
+  async function logoutIdentity(){
+    const previousName=String(liveIdentityName()||"").trim();
+
+    // Déconnexion volontaire : supprimer la session persistante de cet appareil.
+    liveIdentityConfirmed=false;
+    verifiedProfileName="";
+    profileCodeState=null;
+    profileCodeLoadingName="";
+    try{sessionStorage.removeItem(LIVE_IDENTITY_SESSION_KEY);}catch(_e){}
+    try{
+      localStorage.removeItem(LIVE_IDENTITY_KEY);
+      localStorage.removeItem(LEGACY_SPECTATOR_NAME_KEY);
+      localStorage.removeItem(LIVE_TRUSTED_DEVICE_KEY);
+    }catch(_e){}
+
+    clearInterval(appPresenceTimer);
+    appPresenceTimer=null;
+
+    // Retirer tout de suite l'utilisateur des présences Firebase.
+    try{
+      const dbx=window.bptFirebaseDb?.();
+      if(dbx)await dbx.ref(`${APP_PRESENCE_PATH}/${uid()}`).remove();
+    }catch(e){console.warn("Déconnexion présence application :",e);}
+    try{
+      if(current?.active){
+        const r=await ensureRef();
+        await r.child(`viewers/${uid()}`).remove();
+      }
+    }catch(e){console.warn("Déconnexion présence Live :",e);}
+
+    renderConnectedIdentityBadge();
+    try{if(typeof render==="function")render();}catch(_e){}
+    try{openSpectatorIdentity(true);}catch(e){console.warn("Réouverture identification BPT :",e);}
+    try{showBptToast(previousName?`${previousName} est déconnecté.`:"Déconnecté.","ok");}catch(_e){}
   }
 
   function spectatorName(){
@@ -1828,40 +1866,54 @@ function connectionDeviceLabel(){
     return {winner:make('wins',0.5),firstEliminated:make('firstOut',0.5)};
   }
 
+  async function getWritablePredictionContext(){
+    if(!isActive()||!current?.preGamePending||current?.startedAt)return null;
+    const rawName=String(liveIdentityName()||'').trim();
+    const norm=v=>String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase('fr').trim();
+    const r=await ensureRef();
+    const snap=await r.once('value');
+    const server=snap.val();
+    if(!server?.active||server.sessionId!==current.sessionId||server.startedAt||!server.preGamePending)return null;
+    const players=(server.players||[]).map(p=>String(p?.name||'').trim()).filter(Boolean);
+    const name=players.find(p=>norm(p)===norm(rawName))||'';
+    if(!name)return null;
+    return {r,server,players,name,norm};
+  }
+
   async function setLivePrediction(type,pick){
     const kind=type==='winner'?'winner':'firstEliminated',choice=String(pick||'').trim();
-    if(!isActive()||!current?.preGamePending||current?.startedAt)return false;
-    const rawName=String(liveIdentityName()||'').trim(),norm=v=>String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase('fr').trim(),name=(current.players||[]).map(p=>p.name).find(p=>norm(p)===norm(rawName))||'';
-    if(!name)return false;
-    const r=await ensureRef(),session=current.sessionId;let changed=false;
-    const result=await r.transaction(server=>{
-      if(!server?.active||server.sessionId!==session||server.startedAt||!server.preGamePending)return server;
-      if(!(server.players||[]).some(p=>p.name===name)|| (choice && !(server.players||[]).some(p=>p.name===choice)))return server;
-      server.betting=server.betting||{stakeCents:50,odds:buildPredictionOdds((server.players||[]).map(p=>p.name)),bets:{}};
-      server.betting.bets=server.betting.bets||{};
-      const previous=server.betting.bets[name]||{};
-      server.betting.bets[name]={...previous,[kind]:choice,confirmed:false,updatedAt:Date.now()};
-      server.updatedAt=Date.now();changed=true;return server;
+    const ctx=await getWritablePredictionContext();
+    if(!ctx)return false;
+    const {r,server,players,name,norm}=ctx;
+    if(choice && !players.some(p=>norm(p)===norm(choice)))return false;
+    const result=await r.child('betting/bets').transaction(bets=>{
+      bets=(bets&&typeof bets==='object')?bets:{};
+      const previous=bets[name]||{};
+      bets[name]={...previous,[kind]:choice,confirmed:false,updatedAt:Date.now()};
+      return bets;
     });
-    if(changed)current=result.snapshot.val();
-    return changed;
+    if(!result.committed)return false;
+    await r.child('updatedAt').set(Date.now());
+    const latest=await r.once('value');
+    current=bptNormalizeLive3Levels(latest.val());
+    return !!current?.betting?.bets?.[name] && String(current.betting.bets[name][kind]||'')===choice && current.betting.bets[name].confirmed!==true;
   }
 
   async function confirmLivePredictions(){
-    if(!isActive()||!current?.preGamePending||current?.startedAt)return false;
-    const rawName=String(liveIdentityName()||'').trim(),norm=v=>String(v||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase('fr').trim(),name=(current.players||[]).map(p=>p.name).find(p=>norm(p)===norm(rawName))||'';
-    if(!name)return false;
-    const r=await ensureRef(),session=current.sessionId;let changed=false;
-    const result=await r.transaction(server=>{
-      if(!server?.active||server.sessionId!==session||server.startedAt||!server.preGamePending)return server;
-      server.betting=server.betting||{stakeCents:50,odds:buildPredictionOdds((server.players||[]).map(p=>p.name)),bets:{}};
-      server.betting.bets=server.betting.bets||{};
-      const previous=server.betting.bets[name]||{};
-      server.betting.bets[name]={winner:String(previous.winner||''),firstEliminated:String(previous.firstEliminated||''),confirmed:true,updatedAt:Date.now()};
-      server.updatedAt=Date.now();changed=true;return server;
+    const ctx=await getWritablePredictionContext();
+    if(!ctx)return false;
+    const {r,name}=ctx;
+    const result=await r.child('betting/bets').transaction(bets=>{
+      bets=(bets&&typeof bets==='object')?bets:{};
+      const previous=bets[name]||{};
+      bets[name]={winner:String(previous.winner||''),firstEliminated:String(previous.firstEliminated||''),confirmed:true,updatedAt:Date.now()};
+      return bets;
     });
-    if(changed)current=result.snapshot.val();
-    return changed;
+    if(!result.committed)return false;
+    await r.child('updatedAt').set(Date.now());
+    const latest=await r.once('value');
+    current=bptNormalizeLive3Levels(latest.val());
+    return current?.betting?.bets?.[name]?.confirmed===true;
   }
 
   async function createLive(){
@@ -3723,6 +3775,7 @@ async function requestTakeover(){
     $3("live3EndBtn")?.addEventListener("click",endLive);
     $3("live3TakeoverBtn")?.addEventListener("click",requestTakeover);
     $3("live3ForceTakeoverBtn")?.addEventListener("click",forceLive3Takeover);
+    $3('bptLogoutBtn')?.addEventListener('click',logoutIdentity);
     $3('bptChangeProfileCodeBtn')?.addEventListener('click',openProfileCodeChange);
     $3('bptChangeProfileCodeCancel')?.addEventListener('click',closeProfileCodeChange);
     $3('bptChangeProfileCodeSave')?.addEventListener('click',changeProfileCode);
@@ -3861,6 +3914,7 @@ async function requestTakeover(){
     openChat,
     getUnreadChatCount:()=>unreadChatCount,
     getIdentityName:()=>liveIdentityName(),
+    logoutIdentity,
     getVerifiedIdentityName:()=>liveIdentityConfirmed?verifiedProfileName:"",
     openFullscreen,
     closeFullscreen,

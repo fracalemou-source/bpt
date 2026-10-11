@@ -460,6 +460,13 @@ header .app-version{
 .brand{display:flex;flex-direction:column;min-width:0}
 .bpt-connected-identity{display:inline-flex;align-items:center;gap:5px;width:max-content;max-width:100%;margin-top:4px;padding:3px 8px;border:1px solid #3f806b;border-radius:999px;background:#173b30;color:#fff;font-size:11px;font-weight:850;line-height:1.25;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .bpt-connected-identity:empty{display:none}
+.bpt-identity-session{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-top:4px}
+.bpt-identity-session .bpt-connected-identity{margin-top:0}
+.bpt-logout-btn{appearance:none;border:1px solid rgba(255,255,255,.22);border-radius:999px;background:rgba(255,255,255,.08);color:#fff;padding:3px 9px;font:inherit;font-size:11px;font-weight:800;line-height:1.25;cursor:pointer;transition:background .15s ease,border-color .15s ease}
+.bpt-logout-btn:hover,.bpt-logout-btn:focus-visible{background:rgba(255,255,255,.16);border-color:rgba(255,255,255,.4);outline:none}
+.bpt-logout-btn[hidden]{display:none!important}
+@media(max-width:700px){.bpt-identity-session{gap:5px}.bpt-logout-btn{padding:3px 7px;font-size:10px}}
+
 .bpt-logo{display:flex;align-items:center;gap:8px;font-weight:950;letter-spacing:.06em;font-size:27px}
 .bpt-logo svg{width:48px;height:48px}
 .bpt-logo circle{fill:#0f2118;stroke:#c8952e;stroke-width:3}
